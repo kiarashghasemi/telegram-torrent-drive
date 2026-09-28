@@ -32,14 +32,24 @@ jobs:
         run: |
           mkdir -p downloads
 
-          aria2c \
-            --dir="$GITHUB_WORKSPACE/downloads" \
-            --file-allocation=none \
-            --continue=true \
-            --seed-time=0 \
-            --summary-interval=10 \
-            --console-log-level=notice \
-            "$MAGNET"
+         aria2c \
+  --dir="$GITHUB_WORKSPACE/downloads" \
+  --file-allocation=none \
+  --continue=true \
+  --seed-time=0 \
+  --enable-dht=true \
+  --enable-peer-exchange=true \
+  --bt-enable-lpd=true \
+  --bt-tracker-connect-timeout=10 \
+  --bt-tracker-interval=30 \
+  --bt-max-peers=100 \
+  --bt-request-peer-speed-limit=1M \
+  --max-connection-per-server=16 \
+  --split=16 \
+  --min-split-size=1M \
+  --summary-interval=10 \
+  --console-log-level=notice \
+  "$MAGNET"
 
       - name: Show downloaded files
         run: |
