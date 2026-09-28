@@ -1,62 +1,31 @@
-name: Torrent Test
+name: Network Test
 
 on:
   workflow_dispatch:
-    inputs:
-      magnet:
-        description: "Magnet link"
-        required: true
-        type: string
 
 jobs:
-  torrent:
+  test:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache
-          df -h
       - name: Test Internet
         run: |
-          echo "Testing internet..."
+          echo "Testing Google..."
           curl -I --max-time 10 https://www.google.com
+
           echo "Testing GitHub..."
           curl -I --max-time 10 https://github.com
-      - name: Install aria2
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y aria2
 
-      - name: Download torrent
-        env:
-          MAGNET: ${{ inputs.magnet }}
+      - name: Test UDP
         run: |
-          mkdir -p downloads
-          aria2c \
-            --dir="$GITHUB_WORKSPACE/downloads" \
-            --file-allocation=none \
-            --continue=true \
-            --seed-time=0 \
-            --enable-dht=true \
-            --enable-peer-exchange=true \
-            --bt-enable-lpd=true \
-            --bt-tracker-connect-timeout=10 \
-            --bt-tracker-interval=30 \
-            --bt-max-peers=100 \
-            --bt-request-peer-speed-limit=1M \
-            --max-connection-per-server=16 \
-            --split=16 \
-            --min-split-size=1M \
-            --summary-interval=10 \
-            --console-log-level=notice \
-            "$MAGNET"
+          echo "Testing UDP..."
+          timeout 10 bash -c 'echo > /dev/udp/1.1.1.1/6881' \
+            && echo "UDP test passed" \
+            || echo "UDP test failed"
 
-      - name: Show downloaded files
+      - name: Test TCP
         run: |
-          echo "Downloaded files:"
-          du -sh downloads
-          find downloads -type f -printf '%p\n'
+          echo "Testing TCP..."
+          timeout 10 bash -c 'cat < /dev/null > /dev/tcp/1.1.1.1/6881' \
+            && echo "TCP test passed" \
+            || echo "TCP test failed"
