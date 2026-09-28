@@ -26,12 +26,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y aria2
 
-           - name: Download torrent
+      - name: Download torrent
         env:
           MAGNET: ${{ inputs.magnet }}
         run: |
           mkdir -p downloads
-
           aria2c \
             --dir="$GITHUB_WORKSPACE/downloads" \
             --file-allocation=none \
@@ -50,6 +49,7 @@ jobs:
             --summary-interval=10 \
             --console-log-level=notice \
             "$MAGNET"
+
       - name: Show downloaded files
         run: |
           echo "Downloaded files:"
