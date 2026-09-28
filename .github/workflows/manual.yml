@@ -28,7 +28,7 @@ jobs:
             --bt-enable-lpd=true \
             --bt-max-peers=500 \
             --bt-request-peer-speed-limit=0 \
-            --max-connection-per-server=32 \
+            --max-connection-per-server=16 \
             --split=32 \
             --min-split-size=1M \
             --bt-tracker-connect-timeout=10 \
