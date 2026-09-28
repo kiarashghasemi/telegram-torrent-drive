@@ -1,4 +1,4 @@
-name: Torrent Tracker Test
+name: Torrent Speed Test
 
 on:
   workflow_dispatch:
@@ -23,17 +23,16 @@ jobs:
             --dir="$GITHUB_WORKSPACE/downloads" \
             --file-allocation=none \
             --seed-time=0 \
-            --enable-dht=false \
-            --enable-peer-exchange=false \
+            --enable-dht=true \
+            --enable-peer-exchange=true \
+            --bt-enable-lpd=true \
+            --bt-max-peers=500 \
+            --bt-request-peer-speed-limit=0 \
+            --max-connection-per-server=32 \
+            --split=32 \
+            --min-split-size=1M \
             --bt-tracker-connect-timeout=10 \
             --bt-tracker-interval=30 \
-            --bt-max-peers=100 \
-            --max-connection-per-server=16 \
-            --split=16 \
-            --min-split-size=1M \
             --summary-interval=10 \
             --console-log-level=notice \
-            --bt-tracker='udp://tracker.opentrackr.org:1337/announce' \
-            --bt-tracker='udp://open.stealth.si:80/announce' \
-            --bt-tracker='udp://tracker.torrent.eu.org:451/announce' \
             ubuntu-24.04.5.1-desktop-amd64.iso.torrent
