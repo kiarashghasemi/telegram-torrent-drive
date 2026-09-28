@@ -13,22 +13,34 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qbittorrent-nox
 
-      - name: Download Ubuntu torrent
-        run: |
-          wget -q https://releases.ubuntu.com/releases/releases/releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso.torrent
+      - name: Start qBittorrent and download
+  run: |
+    wget -q https://releases.ubuntu.com/releases/releases/releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso.torrent
 
-          mkdir -p downloads
+    mkdir -p downloads
 
-          qbittorrent-nox \
-            --profile="$GITHUB_WORKSPACE/qb-profile" \
-            --configuration="$GITHUB_WORKSPACE/qb-config" \
-            --torrenting-port=6881 \
-            --webui-port=8080 &
-          
-          QB_PID=$!
+    qbittorrent-nox \
+      --profile="$GITHUB_WORKSPACE/qb-profile" \
+      --webui-port=8080 \
+      --confirm-legal-notice \
+      ubuntu-24.04.5.1-desktop-amd64.iso.torrent > qb.log 2>&1 &
 
-          sleep 10
+    QB_PID=$!
 
-          echo "qBittorrent started"
+    sleep 15
 
-          kill $QB_PID || true
+    echo "===== qBittorrent LOG ====="
+    cat qb.log
+
+    echo "===== PROCESS ====="
+    ps aux | grep qbittorrent
+
+    echo "===== FILES ====="
+    find downloads -maxdepth 2 -type f -printf "%p %s bytes\n"
+
+    sleep 60
+
+    echo "===== AFTER 60 SECONDS ====="
+    cat qb.log
+
+    kill $QB_PID || true
