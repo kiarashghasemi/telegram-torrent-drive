@@ -20,7 +20,12 @@ jobs:
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache
           df -h
-
+      - name: Test Internet
+        run: |
+          echo "Testing internet..."
+          curl -I --max-time 10 https://www.google.com
+          echo "Testing GitHub..."
+          curl -I --max-time 10 https://github.com
       - name: Install aria2
         run: |
           sudo apt-get update
