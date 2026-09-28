@@ -1,4 +1,4 @@
-name: Torrent Speed Test
+name: qBittorrent Test
 
 on:
   workflow_dispatch:
@@ -8,10 +8,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install aria2
+      - name: Install qBittorrent
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2
+          sudo apt-get install -y qbittorrent-nox
 
       - name: Download Ubuntu torrent
         run: |
@@ -19,20 +19,16 @@ jobs:
 
           mkdir -p downloads
 
-          aria2c \
-            --dir="$GITHUB_WORKSPACE/downloads" \
-            --file-allocation=none \
-            --seed-time=0 \
-            --enable-dht=true \
-            --enable-peer-exchange=true \
-            --bt-enable-lpd=true \
-            --bt-max-peers=500 \
-            --bt-request-peer-speed-limit=0 \
-            --max-connection-per-server=16 \
-            --split=32 \
-            --min-split-size=1M \
-            --bt-tracker-connect-timeout=10 \
-            --bt-tracker-interval=30 \
-            --summary-interval=10 \
-            --console-log-level=notice \
-            ubuntu-24.04.5.1-desktop-amd64.iso.torrent
+          qbittorrent-nox \
+            --profile="$GITHUB_WORKSPACE/qb-profile" \
+            --configuration="$GITHUB_WORKSPACE/qb-config" \
+            --torrenting-port=6881 \
+            --webui-port=8080 &
+          
+          QB_PID=$!
+
+          sleep 10
+
+          echo "qBittorrent started"
+
+          kill $QB_PID || true
