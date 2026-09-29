@@ -8,38 +8,88 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          df -h
+
       - name: Install qBittorrent
         run: |
           sudo apt-get update
-          sudo apt-get install -y qbittorrent-nox
+          sudo apt-get install -y qbittorrent-nox curl
 
-      - name: Start qBittorrent and download
+      - name: Download Ubuntu torrent
         run: |
           wget -q https://releases.ubuntu.com/releases/releases/releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso.torrent
 
+      - name: Start qBittorrent
+        run: |
           mkdir -p downloads
 
           qbittorrent-nox \
             --profile="$GITHUB_WORKSPACE/qb-profile" \
             --webui-port=8080 \
-            ubuntu-24.04.5.1-desktop-amd64.iso.torrent > qb.log 2>&1 &
+            > qb.log 2>&1 &
 
-          QB_PID=$!
+          echo $! > qb.pid
 
           sleep 15
 
-          echo "===== qBittorrent LOG ====="
+          echo "===== qBittorrent startup ====="
           cat qb.log
 
-          echo "===== PROCESS ====="
-          ps aux | grep qbittorrent
+      - name: Add torrent through Web API
+        run: |
+          PASSWORD=$(grep -oP 'temporary password is provided for this session: \K.*' qb.log)
 
-          echo "===== FILES ====="
-          find downloads -maxdepth 2 -type f -printf "%p %s bytes\n"
+          echo "Logging into qBittorrent..."
 
-          sleep 60
+          curl -i \
+            -c cookies.txt \
+            -H "Referer: http://localhost:8080/" \
+            --data-urlencode "username=admin" \
+            --data-urlencode "password=$PASSWORD" \
+            http://localhost:8080/api/v2/auth/login
 
-          echo "===== AFTER 60 SECONDS ====="
-          cat qb.log
+          echo
+          echo "Adding torrent..."
 
-          kill $QB_PID || true
+          curl -i \
+            -b cookies.txt \
+            -H "Referer: http://localhost:8080/" \
+            -F "torrents=@ubuntu-24.04.5.1-desktop-amd64.iso.torrent" \
+            -F "savepath=$GITHUB_WORKSPACE/downloads" \
+            http://localhost:8080/api/v2/torrents/add
+
+      - name: Monitor download
+        run: |
+          echo "===== MONITORING ====="
+
+          for i in {1..12}; do
+            echo
+            echo "===== CHECK $i ====="
+
+            curl -s \
+              -b cookies.txt \
+              -H "Referer: http://localhost:8080/" \
+              "http://localhost:8080/api/v2/torrents/info" \
+              | python3 -m json.tool || true
+
+            echo
+            echo "===== FILE SIZE ====="
+            find downloads -type f -printf "%p %s bytes\n"
+
+            sleep 10
+          done
+
+      - name: qBittorrent log
+        if: always()
+        run: |
+          echo "===== FINAL LOG ====="
+          cat qb.log || true
+
+          echo "===== FINAL FILES ====="
+          find downloads -type f -printf "%p %s bytes\n" || true
