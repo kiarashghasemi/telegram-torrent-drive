@@ -7,46 +7,62 @@ on:
         description: "Magnet link"
         required: true
         type: string
+
       chat_id:
         description: "Telegram chat ID"
         required: true
         type: string
 
+
 jobs:
+
   download:
+
     runs-on: ubuntu-latest
+
 
     steps:
 
-      # ===============================
+
+      # ==========================================
       # Free disk space
-      # ===============================
+      # ==========================================
 
       - name: Free disk space
+
         run: |
+
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache
+
           df -h
 
 
-      # ===============================
+      # ==========================================
       # Install qBittorrent
-      # ===============================
+      # ==========================================
 
       - name: Install qBittorrent
+
         run: |
+
           sudo apt-get update
-          sudo apt-get install -y qbittorrent-nox curl
+
+          sudo apt-get install -y \
+            qbittorrent-nox \
+            curl
 
 
-      # ===============================
+      # ==========================================
       # Start qBittorrent
-      # ===============================
+      # ==========================================
 
       - name: Start qBittorrent
+
         run: |
+
           mkdir -p downloads
 
           qbittorrent-nox \
@@ -61,20 +77,27 @@ jobs:
           cat qb.log
 
 
-      # ===============================
+      # ==========================================
       # Login
-      # ===============================
+      # ==========================================
 
       - name: Login to qBittorrent
+
         run: |
+
           PASSWORD=$(grep -oP \
             'temporary password is provided for this session: \K.*' \
             qb.log)
 
+
           if [ -z "$PASSWORD" ]; then
+
             echo "Could not find qBittorrent password."
+
             exit 1
+
           fi
+
 
           LOGIN=$(curl -s \
             -c cookies.txt \
@@ -83,21 +106,29 @@ jobs:
             --data-urlencode "password=$PASSWORD" \
             http://localhost:8080/api/v2/auth/login)
 
+
           echo "Login response: $LOGIN"
 
+
           if [ "$LOGIN" != "Ok." ]; then
+
             exit 1
+
           fi
 
 
-      # ===============================
+      # ==========================================
       # Add Magnet
-      # ===============================
+      # ==========================================
 
       - name: Add Magnet
+
         env:
+
           MAGNET: ${{ inputs.magnet }}
+
         run: |
+
           RESPONSE=$(curl -s \
             -b cookies.txt \
             -H "Referer: http://localhost:8080/" \
@@ -105,39 +136,54 @@ jobs:
             --data-urlencode "savepath=$GITHUB_WORKSPACE/downloads" \
             http://localhost:8080/api/v2/torrents/add)
 
+
           echo "Response: $RESPONSE"
 
+
           if [ "$RESPONSE" != "Ok." ]; then
+
             echo "Failed to add magnet."
+
             exit 1
+
           fi
 
 
-      # ===============================
+      # ==========================================
       # Download + Telegram control
-      # ===============================
+      # ==========================================
 
       - name: Download with Telegram control
+
         env:
+
           CHAT_ID: ${{ inputs.chat_id }}
+
           CONTROL_SECRET: ${{ secrets.CONTROL_SECRET }}
+
           WORKER_URL: https://telegram-torrent-bot.agrology-tk.workers.dev
+
         run: |
+
 
           for i in {1..720}; do
 
+
             echo "================================"
+
             echo "CHECK $i"
+
             echo "================================"
 
 
-            # --------------------------------
-            # Get command from Cloudflare
-            # --------------------------------
+            # =====================================
+            # Get command
+            # =====================================
 
             CONTROL=$(curl -s \
               --max-time 10 \
               "$WORKER_URL/control?chat_id=${CHAT_ID}&secret=${CONTROL_SECRET}")
+
 
             COMMAND=$(python3 - "$CONTROL" <<'PY'
           import sys
@@ -151,12 +197,13 @@ jobs:
           PY
             )
 
+
             echo "Command: $COMMAND"
 
 
-            # --------------------------------
+            # =====================================
             # Pause
-            # --------------------------------
+            # =====================================
 
             if [ "$COMMAND" = "pause" ]; then
 
@@ -172,9 +219,9 @@ jobs:
             fi
 
 
-            # --------------------------------
+            # =====================================
             # Resume
-            # --------------------------------
+            # =====================================
 
             if [ "$COMMAND" = "resume" ]; then
 
@@ -190,13 +237,14 @@ jobs:
             fi
 
 
-            # --------------------------------
+            # =====================================
             # Cancel
-            # --------------------------------
+            # =====================================
 
             if [ "$COMMAND" = "cancel" ]; then
 
               echo "Cancelling torrent..."
+
 
               curl -s \
                 -b cookies.txt \
@@ -205,14 +253,16 @@ jobs:
                 -X POST \
                 http://localhost:8080/api/v2/torrents/delete
 
+
               echo "Torrent cancelled."
+
 
               curl -s \
                 --max-time 10 \
                 -X POST \
+                -H "Authorization: Bearer ${CONTROL_SECRET}" \
                 -H "Content-Type: application/json" \
                 -d "{
-                  \"secret\":\"${CONTROL_SECRET}\",
                   \"chat_id\":\"${CHAT_ID}\",
                   \"status\":\"cancelled\",
                   \"progress\":0,
@@ -222,16 +272,18 @@ jobs:
                 }" \
                 "$WORKER_URL/status"
 
+
               touch CANCELLED
+
 
               exit 0
 
             fi
 
 
-            # --------------------------------
+            # =====================================
             # Get torrent information
-            # --------------------------------
+            # =====================================
 
             DATA=$(curl -s \
               -b cookies.txt \
@@ -239,128 +291,159 @@ jobs:
               "http://localhost:8080/api/v2/torrents/info")
 
 
-            # --------------------------------
+            # =====================================
             # Parse torrent information
-            # --------------------------------
+            # =====================================
 
             python3 - "$DATA" > torrent_status.json <<'PY'
+
           import sys
           import json
 
+
           try:
+
               data = json.loads(sys.argv[1])
+
           except:
+
               data = []
 
+
           if not data:
+
               result = {
+
                   "status": "waiting",
+
                   "progress": 0,
+
                   "speed": 0,
+
                   "eta": None,
+
                   "name": None
+
               }
+
 
           else:
 
               t = data[0]
 
+
               result = {
-                  "status": t.get("state", "unknown"),
-                  "progress": round(
-                      t.get("progress", 0) * 100,
-                      2
-                  ),
-                  "speed": round(
-                      t.get("dlspeed", 0) / 1024 / 1024,
-                      2
-                  ),
-                  "eta": t.get("eta"),
-                  "name": t.get("name")
+
+                  "status":
+                      t.get(
+                          "state",
+                          "unknown"
+                      ),
+
+                  "progress":
+                      round(
+                          t.get(
+                              "progress",
+                              0
+                          ) * 100,
+                          2
+                      ),
+
+                  "speed":
+                      round(
+                          t.get(
+                              "dlspeed",
+                              0
+                          ) / 1024 / 1024,
+                          2
+                      ),
+
+                  "eta":
+                      t.get("eta"),
+
+                  "name":
+                      t.get("name")
+
               }
 
-          print(json.dumps(result))
+
+          print(
+              json.dumps(result)
+          )
+
           PY
 
 
-            # --------------------------------
-            # Display status in GitHub log
-            # --------------------------------
+            # =====================================
+            # Display status
+            # =====================================
 
             cat torrent_status.json
 
 
-            # --------------------------------
-            # Send status to Cloudflare Worker
-            # --------------------------------
+            # =====================================
+            # Send status to Cloudflare
+            # =====================================
 
-            python3 <<'PY'
-
-          import json
-          import os
-          import urllib.request
-
-          with open("torrent_status.json") as f:
-              status = json.load(f)
-
-          payload = {
-              "secret": os.environ["CONTROL_SECRET"],
-              "chat_id": os.environ["CHAT_ID"],
-              "status": status["status"],
-              "progress": status["progress"],
-              "speed": status["speed"],
-              "eta": status["eta"],
-              "name": status["name"]
+            RESPONSE=$(curl -s \
+              --max-time 10 \
+              -w "\nHTTP_STATUS:%{http_code}" \
+              -X POST \
+              -H "Authorization: Bearer ${CONTROL_SECRET}" \
+              -H "Content-Type: application/json" \
+              --data-binary @- \
+              "$WORKER_URL/status" <<EOF
+          {
+            "chat_id": "${CHAT_ID}",
+            "status": $(python3 -c 'import json; print(json.dumps(json.load(open("torrent_status.json"))["status"]))'),
+            "progress": $(python3 -c 'import json; print(json.load(open("torrent_status.json"))["progress"])'),
+            "speed": $(python3 -c 'import json; print(json.load(open("torrent_status.json"))["speed"])'),
+            "eta": $(python3 -c 'import json; print(json.load(open("torrent_status.json"))["eta"])'),
+            "name": $(python3 -c 'import json; print(json.dumps(json.load(open("torrent_status.json"))["name"]))')
           }
-
-          request = urllib.request.Request(
-              os.environ["WORKER_URL"] + "/status",
-              data=json.dumps(payload).encode(),
-              headers={
-                  "Content-Type": "application/json"
-              },
-              method="POST"
-          )
-
-          try:
-
-              with urllib.request.urlopen(
-                  request,
-                  timeout=10
-              ) as response:
-
-                  print(
-                      "Worker status:",
-                      response.read().decode()
-                  )
-
-          except Exception as e:
-
-              print(
-                  "Could not send status:",
-                  e
-              )
-
-          PY
+          EOF
+            )
 
 
-            # --------------------------------
+            echo "Worker status response:"
+
+            echo "$RESPONSE"
+
+
+            # =====================================
             # Check completion
-            # --------------------------------
+            # =====================================
 
             COMPLETE=$(python3 - "$DATA" <<'PY'
+
           import sys
           import json
 
+
           try:
+
               data = json.loads(sys.argv[1])
+
           except:
+
               data = []
 
-          if data and data[0].get("progress", 0) >= 0.9999:
+
+          if (
+              data
+              and
+              data[0].get(
+                  "progress",
+                  0
+              ) >= 0.9999
+          ):
+
               print("YES")
+
           else:
+
               print("NO")
+
           PY
             )
 
@@ -369,16 +452,18 @@ jobs:
 
               echo "Download completed successfully."
 
+
               curl -s \
                 --max-time 10 \
                 -X POST \
+                -H "Authorization: Bearer ${CONTROL_SECRET}" \
                 -H "Content-Type: application/json" \
                 -d "{
-                  \"secret\":\"${CONTROL_SECRET}\",
                   \"chat_id\":\"${CHAT_ID}\",
                   \"status\":\"completed\"
                 }" \
                 "$WORKER_URL/status"
+
 
               break
 
@@ -390,41 +475,53 @@ jobs:
           done
 
 
-      # ===============================
-      # Verify files
-      # ===============================
+      # ==========================================
+      # Verify downloaded files
+      # ==========================================
 
       - name: Verify downloaded files
+
         run: |
 
           if [ -f CANCELLED ]; then
+
             echo "Download was cancelled."
+
             exit 0
+
           fi
 
+
           echo "===== DOWNLOADED FILES ====="
+
 
           find downloads \
             -type f \
             -printf "%p %s bytes\n"
 
+
           echo
+
           echo "===== DISK SPACE ====="
+
 
           df -h
 
 
-      # ===============================
+      # ==========================================
       # Install Google Drive libraries
-      # ===============================
+      # ==========================================
 
       - name: Install Google Drive libraries
-        if: ${{ !cancelled() }}
+
         run: |
 
           if [ -f CANCELLED ]; then
+
             exit 0
+
           fi
+
 
           python3 -m pip install \
             --break-system-packages \
@@ -433,50 +530,71 @@ jobs:
             google-auth-httplib2
 
 
-      # ===============================
+      # ==========================================
       # Upload to Google Drive
-      # ===============================
+      # ==========================================
 
       - name: Upload to Google Drive
-        if: ${{ !cancelled() }}
+
         env:
+
           GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+
         run: |
 
           if [ -f CANCELLED ]; then
+
             echo "Cancelled. Skipping Google Drive upload."
+
             exit 0
+
           fi
+
 
           python3 <<'PY'
 
           import os
           import json
+
           from pathlib import Path
 
           from google.oauth2.credentials import Credentials
+
           from google.auth.transport.requests import Request
+
           from googleapiclient.discovery import build
+
           from googleapiclient.http import MediaFileUpload
 
 
-          print("Connecting to Google Drive...")
-
-
-          token = json.loads(
-              os.environ["GOOGLE_TOKEN_JSON"]
+          print(
+              "Connecting to Google Drive..."
           )
 
 
-          credentials = Credentials.from_authorized_user_info(
-              token,
-              [
-                  "https://www.googleapis.com/auth/drive.file"
+          token = json.loads(
+              os.environ[
+                  "GOOGLE_TOKEN_JSON"
               ]
           )
 
 
-          if credentials.expired and credentials.refresh_token:
+          credentials = (
+              Credentials
+              .from_authorized_user_info(
+                  token,
+                  [
+                      "https://www.googleapis.com/auth/drive.file"
+                  ]
+              )
+          )
+
+
+          if (
+              credentials.expired
+              and
+              credentials.refresh_token
+          ):
 
               credentials.refresh(
                   Request()
@@ -491,13 +609,21 @@ jobs:
 
 
           files = [
+
               p
-              for p in Path("downloads").rglob("*")
+
+              for p
+              in Path(
+                  "downloads"
+              ).rglob("*")
+
               if p.is_file()
+
           ]
 
 
           if not files:
+
               raise RuntimeError(
                   "No downloaded files found."
               )
@@ -505,7 +631,9 @@ jobs:
 
           for path in files:
 
+
               print()
+
               print(
                   "Uploading:",
                   path.name
@@ -513,21 +641,38 @@ jobs:
 
 
               metadata = {
-                  "name": path.name
+
+                  "name":
+                      path.name
+
               }
 
 
               media = MediaFileUpload(
+
                   str(path),
+
                   resumable=True,
-                  chunksize=100 * 1024 * 1024
+
+                  chunksize=
+                      100 * 1024 * 1024
+
               )
 
 
-              request = service.files().create(
-                  body=metadata,
-                  media_body=media,
-                  fields="id,name,size"
+              request = (
+                  service
+                  .files()
+                  .create(
+
+                      body=metadata,
+
+                      media_body=media,
+
+                      fields=
+                          "id,name,size"
+
+                  )
               )
 
 
@@ -536,13 +681,19 @@ jobs:
 
               while response is None:
 
-                  status, response = request.next_chunk()
+
+                  status, response = (
+                      request.next_chunk()
+                  )
+
 
                   if status:
 
                       print(
+
                           f"Upload progress: "
                           f"{status.progress() * 100:.1f}%"
+
                       )
 
 
@@ -550,31 +701,41 @@ jobs:
                   "UPLOAD COMPLETE"
               )
 
+
               print(
                   "File ID:",
                   response["id"]
               )
+
 
               print(
                   "File name:",
                   response["name"]
               )
 
+
           PY
 
 
-      # ===============================
+      # ==========================================
       # Cleanup
-      # ===============================
+      # ==========================================
 
       - name: Cleanup
+
         if: always()
+
         run: |
 
           if [ -f qb.pid ]; then
-            kill "$(cat qb.pid)" 2>/dev/null || true
+
+            kill "$(cat qb.pid)" \
+              2>/dev/null || true
+
           fi
 
+
           rm -f cookies.txt
+
 
           df -h
