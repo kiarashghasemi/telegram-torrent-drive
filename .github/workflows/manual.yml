@@ -13,14 +13,300 @@ on:
         type: string
 
 jobs:
-  test:
+  download:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Test
+      - name: Free disk space
         run: |
-          echo "MAGNET RECEIVED"
-          echo "Chat ID: ${{ inputs.chat_id }}"
-          echo "Magnet length: ${#MAGNET}"
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          df -h
+
+      - name: Install qBittorrent
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qbittorrent-nox curl
+
+      - name: Start qBittorrent
+        run: |
+          mkdir -p downloads
+
+          qbittorrent-nox \
+            --profile="$GITHUB_WORKSPACE/qb-profile" \
+            --webui-port=8080 \
+            > qb.log 2>&1 &
+
+          echo $! > qb.pid
+
+          sleep 15
+
+          cat qb.log
+
+      - name: Login to qBittorrent
+        run: |
+          PASSWORD=$(grep -oP \
+            'temporary password is provided for this session: \K.*' \
+            qb.log)
+
+          if [ -z "$PASSWORD" ]; then
+            echo "Could not find qBittorrent password."
+            exit 1
+          fi
+
+          LOGIN=$(curl -s \
+            -c cookies.txt \
+            -H "Referer: http://localhost:8080/" \
+            --data-urlencode "username=admin" \
+            --data-urlencode "password=$PASSWORD" \
+            http://localhost:8080/api/v2/auth/login)
+
+          echo "Login response: $LOGIN"
+
+          if [ "$LOGIN" != "Ok." ]; then
+            exit 1
+          fi
+
+      - name: Add Magnet
         env:
           MAGNET: ${{ inputs.magnet }}
+        run: |
+          RESPONSE=$(curl -s \
+            -b cookies.txt \
+            -H "Referer: http://localhost:8080/" \
+            --data-urlencode "urls=$MAGNET" \
+            --data-urlencode "savepath=$GITHUB_WORKSPACE/downloads" \
+            http://localhost:8080/api/v2/torrents/add)
+
+          echo "Response: $RESPONSE"
+
+          if [ "$RESPONSE" != "Ok." ]; then
+            echo "Failed to add magnet."
+            exit 1
+          fi
+
+      - name: Download with Telegram control
+        env:
+          CHAT_ID: ${{ inputs.chat_id }}
+          CONTROL_SECRET: ${{ secrets.CONTROL_SECRET }}
+        run: |
+
+          for i in {1..720}; do
+
+            echo "================================"
+            echo "CHECK $i"
+            echo "================================"
+
+            CONTROL=$(curl -s \
+              --max-time 10 \
+              "https://telegram-torrent-bot.agrology-tk.workers.dev/control?chat_id=${CHAT_ID}&secret=${CONTROL_SECRET}")
+
+            COMMAND=$(python3 - "$CONTROL" <<'PY'
+          import sys
+          import json
+
+          try:
+              data = json.loads(sys.argv[1])
+              print(data.get("command", "none"))
+          except:
+              print("none")
+          PY
+          )
+
+            echo "Command: $COMMAND"
+
+            if [ "$COMMAND" = "pause" ]; then
+              echo "Pausing torrent..."
+
+              curl -s \
+                -b cookies.txt \
+                -H "Referer: http://localhost:8080/" \
+                --data-urlencode "hashes=all" \
+                -X POST \
+                http://localhost:8080/api/v2/torrents/pause
+            fi
+
+            if [ "$COMMAND" = "resume" ]; then
+              echo "Resuming torrent..."
+
+              curl -s \
+                -b cookies.txt \
+                -H "Referer: http://localhost:8080/" \
+                --data-urlencode "hashes=all" \
+                -X POST \
+                http://localhost:8080/api/v2/torrents/resume
+            fi
+
+            if [ "$COMMAND" = "cancel" ]; then
+              echo "Cancelling torrent..."
+
+              curl -s \
+                -b cookies.txt \
+                -H "Referer: http://localhost:8080/" \
+                --data-urlencode "hashes=all" \
+                -X POST \
+                http://localhost:8080/api/v2/torrents/delete
+
+              echo "Torrent cancelled."
+
+              exit 0
+            fi
+
+            DATA=$(curl -s \
+              -b cookies.txt \
+              -H "Referer: http://localhost:8080/" \
+              "http://localhost:8080/api/v2/torrents/info")
+
+            python3 - "$DATA" <<'PY'
+          import sys
+          import json
+
+          data = json.loads(sys.argv[1])
+
+          if not data:
+              print("Waiting for torrent metadata...")
+              sys.exit()
+
+          t = data[0]
+
+          print("--------------------------------")
+          print("Name:", t.get("name"))
+          print("State:", t.get("state"))
+          print("Progress:", round(t.get("progress", 0) * 100, 2), "%")
+          print("Speed:", round(t.get("dlspeed", 0) / 1024 / 1024, 2), "MB/s")
+          print("Peers:", t.get("num_peers"))
+          print("Seeds:", t.get("num_seeds"))
+          print("ETA:", t.get("eta"), "sec")
+          print("--------------------------------")
+          PY
+
+            COMPLETE=$(python3 - "$DATA" <<'PY'
+          import sys
+          import json
+
+          data = json.loads(sys.argv[1])
+
+          if data and data[0].get("progress", 0) >= 0.9999:
+              print("YES")
+          else:
+              print("NO")
+          PY
+          )
+
+            if [ "$COMPLETE" = "YES" ]; then
+              echo "Download completed successfully."
+              break
+            fi
+
+            sleep 5
+          done
+
+      - name: Verify downloaded files
+        run: |
+          echo "===== DOWNLOADED FILES ====="
+
+          find downloads \
+            -type f \
+            -printf "%p %s bytes\n"
+
+          echo
+          echo "===== DISK SPACE ====="
+
+          df -h
+
+      - name: Install Google Drive libraries
+        run: |
+          python3 -m pip install \
+            --break-system-packages \
+            google-api-python-client \
+            google-auth \
+            google-auth-httplib2
+
+      - name: Upload to Google Drive
+        env:
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+        run: |
+          python3 <<'PY'
+          import os
+          import json
+          from pathlib import Path
+
+          from google.oauth2.credentials import Credentials
+          from google.auth.transport.requests import Request
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          print("Connecting to Google Drive...")
+
+          token = json.loads(os.environ["GOOGLE_TOKEN_JSON"])
+
+          credentials = Credentials.from_authorized_user_info(
+              token,
+              ["https://www.googleapis.com/auth/drive.file"]
+          )
+
+          if credentials.expired and credentials.refresh_token:
+              credentials.refresh(Request())
+
+          service = build(
+              "drive",
+              "v3",
+              credentials=credentials
+          )
+
+          files = [
+              p for p in Path("downloads").rglob("*")
+              if p.is_file()
+          ]
+
+          if not files:
+              raise RuntimeError("No downloaded files found.")
+
+          for path in files:
+
+              print()
+              print("Uploading:", path.name)
+
+              metadata = {
+                  "name": path.name
+              }
+
+              media = MediaFileUpload(
+                  str(path),
+                  resumable=True,
+                  chunksize=100 * 1024 * 1024
+              )
+
+              request = service.files().create(
+                  body=metadata,
+                  media_body=media,
+                  fields="id,name,size"
+              )
+
+              response = None
+
+              while response is None:
+                  status, response = request.next_chunk()
+
+                  if status:
+                      print(
+                          f"Upload progress: "
+                          f"{status.progress() * 100:.1f}%"
+                      )
+
+              print("UPLOAD COMPLETE")
+              print("File ID:", response["id"])
+              print("File name:", response["name"])
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ -f qb.pid ]; then
+            kill "$(cat qb.pid)" 2>/dev/null || true
+          fi
+
+          rm -f cookies.txt
+
+          df -h
