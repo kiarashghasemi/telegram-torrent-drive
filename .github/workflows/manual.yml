@@ -39,35 +39,60 @@ jobs:
 
           sleep 15
 
+          echo "===== qBittorrent ====="
           cat qb.log
 
       - name: Login to qBittorrent
         run: |
           PASSWORD=$(grep -oP 'temporary password is provided for this session: \K.*' qb.log)
 
-          curl -s \
+          if [ -z "$PASSWORD" ]; then
+            echo "Could not find qBittorrent temporary password."
+            exit 1
+          fi
+
+          echo "Logging into qBittorrent..."
+
+          LOGIN=$(curl -s \
             -c cookies.txt \
             -H "Referer: http://localhost:8080/" \
             --data-urlencode "username=admin" \
             --data-urlencode "password=$PASSWORD" \
-            http://localhost:8080/api/v2/auth/login
+            http://localhost:8080/api/v2/auth/login)
+
+          echo "Login response: $LOGIN"
+
+          if [ "$LOGIN" != "Ok." ]; then
+            echo "qBittorrent login failed."
+            exit 1
+          fi
 
       - name: Add Magnet
         env:
           MAGNET: ${{ inputs.magnet }}
         run: |
-          curl -s \
+          echo "Adding magnet..."
+
+          RESPONSE=$(curl -s \
             -b cookies.txt \
             -H "Referer: http://localhost:8080/" \
             --data-urlencode "urls=$MAGNET" \
             --data-urlencode "savepath=$GITHUB_WORKSPACE/downloads" \
-            http://localhost:8080/api/v2/torrents/add
+            http://localhost:8080/api/v2/torrents/add)
 
-          echo
-          echo "Magnet added."
+          echo "Response: $RESPONSE"
+
+          if [ "$RESPONSE" != "Ok." ]; then
+            echo "Failed to add magnet."
+            exit 1
+          fi
+
+          echo "Magnet added successfully."
 
       - name: Wait for download
         run: |
+          echo "===== DOWNLOAD ====="
+
           for i in {1..720}; do
 
             DATA=$(curl -s \
@@ -75,41 +100,62 @@ jobs:
               -H "Referer: http://localhost:8080/" \
               "http://localhost:8080/api/v2/torrents/info")
 
-            RESULT=$(python3 - "$DATA" <<'PY'
+            python3 - "$DATA" <<'PY'
           import sys
           import json
 
           data = json.loads(sys.argv[1])
 
           if not data:
-              print("WAITING")
+              print("Waiting for torrent metadata...")
               sys.exit(0)
 
           t = data[0]
 
-          progress = t["progress"] * 100
-          speed = t["dlspeed"] / 1024 / 1024
-          eta = t["eta"]
-          state = t["state"]
+          progress = t.get("progress", 0) * 100
+          speed = t.get("dlspeed", 0) / 1024 / 1024
+          eta = t.get("eta", 0)
+          state = t.get("state", "unknown")
+          peers = t.get("num_peers", 0)
+          seeds = t.get("num_seeds", 0)
+          downloaded = t.get("downloaded", 0)
+          total = t.get("total_size", 0)
 
-          print(
-              f"State: {state}\n"
-              f"Progress: {progress:.2f}%\n"
-              f"Speed: {speed:.2f} MB/s\n"
-              f"ETA: {eta} sec"
-          )
+          print("--------------------------------")
+          print(f"Name: {t.get('name', 'Unknown')}")
+          print(f"State: {state}")
+          print(f"Progress: {progress:.2f}%")
+          print(f"Speed: {speed:.2f} MB/s")
+          print(f"Peers: {peers}")
+          print(f"Seeds: {seeds}")
+          print(f"Downloaded: {downloaded / 1024 / 1024:.2f} MB")
+          print(f"Total: {total / 1024 / 1024:.2f} MB")
+          print(f"ETA: {eta} sec")
+          print("--------------------------------")
 
-          if progress >= 100:
+          if progress >= 99.99:
               print("DOWNLOAD_COMPLETE")
-              sys.exit(2)
+          PY
+
+            DATA=$(curl -s \
+              -b cookies.txt \
+              -H "Referer: http://localhost:8080/" \
+              "http://localhost:8080/api/v2/torrents/info")
+
+            COMPLETE=$(python3 - "$DATA" <<'PY'
+          import sys
+          import json
+
+          data = json.loads(sys.argv[1])
+
+          if data and data[0].get("progress", 0) >= 0.9999:
+              print("YES")
+          else:
+              print("NO")
           PY
           )
 
-            CODE=$?
-
-            echo "$RESULT"
-
-            if [ "$CODE" -eq 2 ]; then
+            if [ "$COMPLETE" = "YES" ]; then
               echo "Download completed successfully."
               break
             fi
@@ -120,11 +166,20 @@ jobs:
       - name: Verify downloaded files
         run: |
           echo "===== DOWNLOADED FILES ====="
-          find downloads -type f -printf "%p %s bytes\n"
+
+          find downloads \
+            -type f \
+            -printf "%p %s bytes\n"
 
           echo
-          echo "===== DISK ====="
+          echo "===== DISK SPACE ====="
+
           df -h
+
+          echo
+          echo "===== FILE COUNT ====="
+
+          find downloads -type f | wc -l
 
       - name: Install Google Drive libraries
         run: |
@@ -148,6 +203,8 @@ jobs:
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
 
+          print("Connecting to Google Drive...")
+
           token = json.loads(os.environ["GOOGLE_TOKEN_JSON"])
 
           credentials = Credentials.from_authorized_user_info(
@@ -156,6 +213,7 @@ jobs:
           )
 
           if credentials.expired and credentials.refresh_token:
+              print("Refreshing Google access token...")
               credentials.refresh(Request())
 
           service = build(
@@ -172,11 +230,17 @@ jobs:
           if not files:
               raise RuntimeError("No downloaded files found.")
 
+          print(f"Found {len(files)} file(s).")
+
           for path in files:
+
               size = path.stat().st_size
 
-              print(f"Uploading: {path}")
+              print()
+              print("================================")
+              print(f"Uploading: {path.name}")
               print(f"Size: {size / 1024 / 1024:.2f} MB")
+              print("================================")
 
               metadata = {
                   "name": path.name
@@ -197,23 +261,32 @@ jobs:
               response = None
 
               while response is None:
+
                   status, response = request.next_chunk()
 
                   if status:
+                      progress = status.progress() * 100
                       print(
-                          f"Upload progress: "
-                          f"{status.progress() * 100:.1f}%"
+                          f"Upload progress: {progress:.1f}%"
                       )
 
+              print()
               print("UPLOAD COMPLETE")
-              print(response)
-          PY
+              print(f"File ID: {response['id']}")
+              print(f"File name: {response['name']}")
+              print(f"File size: {response['size']} bytes")
 
       - name: Cleanup
         if: always()
         run: |
-          kill $(cat qb.pid) 2>/dev/null || true
+          echo "Stopping qBittorrent..."
+
+          if [ -f qb.pid ]; then
+            kill "$(cat qb.pid)" 2>/dev/null || true
+          fi
+
           rm -f cookies.txt
 
+          echo
           echo "===== FINAL DISK ====="
           df -h
