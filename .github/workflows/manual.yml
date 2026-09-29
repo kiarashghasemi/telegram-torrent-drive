@@ -7,735 +7,652 @@ on:
         description: "Magnet link"
         required: true
         type: string
-
       chat_id:
         description: "Telegram chat ID"
         required: true
         type: string
+      job_id:
+        description: "Unique torrent job ID"
+        required: true
+        type: string
 
+permissions:
+  contents: read
 
 jobs:
-
-  download:
-
+  torrent:
     runs-on: ubuntu-latest
 
+    env:
+      MAGNET: ${{ inputs.magnet }}
+      CHAT_ID: ${{ inputs.chat_id }}
+      JOB_ID: ${{ inputs.job_id }}
+      WORKER_URL: https://telegram-torrent-bot.agrology-tk.workers.dev
+      CONTROL_SECRET: ${{ secrets.CONTROL_SECRET }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-
-      # ==========================================
-      # Free disk space
-      # ==========================================
-
-      - name: Free disk space
-
+      - name: Create helper scripts
+        shell: bash
         run: |
+          set -e
 
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache
+          cat > send_status.sh <<'BASH'
+          #!/usr/bin/env bash
+          set +e
 
-          df -h
+          STAGE="${1:-preparing}"
+          PROGRESS="${2:-0}"
+          SPEED="${3:-0}"
+          ETA="${4:-0}"
+          STATUS="${5:-$STAGE}"
+          NAME="${6:-}"
 
+          curl -sS --max-time 10 \
+            -X POST \
+            -H "Authorization: Bearer ${CONTROL_SECRET}" \
+            -H "Content-Type: application/json" \
+            --data-binary @- \
+            "${WORKER_URL}/status" <<EOF
+          {
+            "chat_id": "${CHAT_ID}",
+            "job_id": "${JOB_ID}",
+            "stage": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$STAGE"),
+            "status": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$STATUS"),
+            "progress": ${PROGRESS:-0},
+            "speed": ${SPEED:-0},
+            "eta": ${ETA:-0},
+            "name": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$NAME"),
+            "details": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${7:-}")
+          }
+          EOF
+          BASH
 
-      # ==========================================
-      # Install qBittorrent
-      # ==========================================
+          cat > status <<'BASH'
+          #!/usr/bin/env bash
+          STAGE="${1:-preparing}"
+          PROGRESS="${2:-0}"
+          SPEED="${3:-0}"
+          ETA="${4:-0}"
+          STATUS="${5:-$STAGE}"
+          NAME="${6:-}"
+          DETAILS="${7:-}"
+          ./send_status.sh "$STAGE" "$PROGRESS" "$SPEED" "$ETA" "$STATUS" "$NAME" "$DETAILS" >/dev/null 2>&1 || true
+          BASH
 
-      - name: Install qBittorrent
+          chmod +x send_status.sh status
 
+          mkdir -p downloads qb-profile screenshots
+
+      - name: Initial status
+        shell: bash
         run: |
+          set -e
+          status "preparing" 2 0 0 "preparing" "در حال آماده‌سازی" "GitHub Runner شروع شد"
 
-          sudo apt-get update
+      - name: Install required software
+        shell: bash
+        run: |
+          set -e
 
-          sudo apt-get install -y \
-            qbittorrent-nox \
-            curl
+          status "preparing" 5 0 0 "preparing" "در حال نصب فایل‌های مورد نیاز" "apt و ابزارهای لازم در حال نصب هستند"
 
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qbittorrent-nox ffmpeg python3-pip curl jq
 
-      # ==========================================
-      # Start qBittorrent
-      # ==========================================
+          python3 -m pip install --quiet --break-system-packages \
+            google-api-python-client \
+            google-auth \
+            google-auth-httplib2
+
+          status "preparing" 12 0 0 "preparing" "فایل‌های مورد نیاز آماده شدند" "qBittorrent، FFmpeg و Google Drive API آماده‌اند"
 
       - name: Start qBittorrent
-
+        shell: bash
         run: |
+          set -e
 
-          mkdir -p downloads
+          status "preparing" 15 0 0 "preparing" "در حال راه‌اندازی qBittorrent" "Web UI در حال آماده‌سازی است"
 
           qbittorrent-nox \
             --profile="$GITHUB_WORKSPACE/qb-profile" \
             --webui-port=8080 \
             > qb.log 2>&1 &
 
-          echo $! > qb.pid
-
-          sleep 15
-
-          cat qb.log
-
-
-      # ==========================================
-      # Login
-      # ==========================================
-
-      - name: Login to qBittorrent
-
-        run: |
-
-          PASSWORD=$(grep -oP \
-            'temporary password is provided for this session: \K.*' \
-            qb.log)
-
-
-          if [ -z "$PASSWORD" ]; then
-
-            echo "Could not find qBittorrent password."
-
-            exit 1
-
-          fi
-
-
-          LOGIN=$(curl -s \
-            -c cookies.txt \
-            -H "Referer: http://localhost:8080/" \
-            --data-urlencode "username=admin" \
-            --data-urlencode "password=$PASSWORD" \
-            http://localhost:8080/api/v2/auth/login)
-
-
-          echo "Login response: $LOGIN"
-
-
-          if [ "$LOGIN" != "Ok." ]; then
-
-            exit 1
-
-          fi
-
-
-      # ==========================================
-      # Add Magnet
-      # ==========================================
-
-      - name: Add Magnet
-
-        env:
-
-          MAGNET: ${{ inputs.magnet }}
-
-        run: |
-
-          RESPONSE=$(curl -s \
-            -b cookies.txt \
-            -H "Referer: http://localhost:8080/" \
-            --data-urlencode "urls=$MAGNET" \
-            --data-urlencode "savepath=$GITHUB_WORKSPACE/downloads" \
-            http://localhost:8080/api/v2/torrents/add)
-
-
-          echo "Response: $RESPONSE"
-
-
-          if [ "$RESPONSE" != "Ok." ]; then
-
-            echo "Failed to add magnet."
-
-            exit 1
-
-          fi
-
-
-      # ==========================================
-      # Download + Telegram control
-      # ==========================================
-
-      - name: Download with Telegram control
-
-        env:
-
-          CHAT_ID: ${{ inputs.chat_id }}
-
-          CONTROL_SECRET: ${{ secrets.CONTROL_SECRET }}
-
-          WORKER_URL: https://telegram-torrent-bot.agrology-tk.workers.dev
-
-        run: |
-
-
-          for i in {1..720}; do
-
-
-            echo "================================"
-
-            echo "CHECK $i"
-
-            echo "================================"
-
-
-            # =====================================
-            # Get command
-            # =====================================
-
-            CONTROL=$(curl -s \
-              --max-time 10 \
-              "$WORKER_URL/control?chat_id=${CHAT_ID}&secret=${CONTROL_SECRET}")
-
-
-            COMMAND=$(python3 - "$CONTROL" <<'PY'
-          import sys
-          import json
-
-          try:
-              data = json.loads(sys.argv[1])
-              print(data.get("command", "none"))
-          except:
-              print("none")
-          PY
-            )
-
-
-            echo "Command: $COMMAND"
-
-
-            # =====================================
-            # Pause
-            # =====================================
-
-            if [ "$COMMAND" = "pause" ]; then
-
-              echo "Pausing torrent..."
-
-              curl -s \
-                -b cookies.txt \
-                -H "Referer: http://localhost:8080/" \
-                --data-urlencode "hashes=all" \
-                -X POST \
-                http://localhost:8080/api/v2/torrents/pause
-
-            fi
-
-
-            # =====================================
-            # Resume
-            # =====================================
-
-            if [ "$COMMAND" = "resume" ]; then
-
-              echo "Resuming torrent..."
-
-              curl -s \
-                -b cookies.txt \
-                -H "Referer: http://localhost:8080/" \
-                --data-urlencode "hashes=all" \
-                -X POST \
-                http://localhost:8080/api/v2/torrents/resume
-
-            fi
-
-
-            # =====================================
-            # Cancel
-            # =====================================
-
-            if [ "$COMMAND" = "cancel" ]; then
-
-              echo "Cancelling torrent..."
-
-
-              curl -s \
-                -b cookies.txt \
-                -H "Referer: http://localhost:8080/" \
-                --data-urlencode "hashes=all" \
-                -X POST \
-                http://localhost:8080/api/v2/torrents/delete
-
-
-              echo "Torrent cancelled."
-
-
-              curl -s \
-                --max-time 10 \
-                -X POST \
-                -H "Authorization: Bearer ${CONTROL_SECRET}" \
-                -H "Content-Type: application/json" \
-                -d "{
-                  \"chat_id\":\"${CHAT_ID}\",
-                  \"status\":\"cancelled\",
-                  \"progress\":0,
-                  \"speed\":0,
-                  \"eta\":null,
-                  \"name\":null
-                }" \
-                "$WORKER_URL/status"
-
-
-              touch CANCELLED
-
-
-              exit 0
-
-            fi
-
-
-            # =====================================
-            # Get torrent information
-            # =====================================
-
-            DATA=$(curl -s \
-              -b cookies.txt \
-              -H "Referer: http://localhost:8080/" \
-              "http://localhost:8080/api/v2/torrents/info")
-
-
-            # =====================================
-            # Parse torrent information
-            # =====================================
-
-            python3 - "$DATA" > torrent_status.json <<'PY'
-
-          import sys
-          import json
-
-
-          try:
-
-              data = json.loads(sys.argv[1])
-
-          except:
-
-              data = []
-
-
-          if not data:
-
-              result = {
-
-                  "status": "waiting",
-
-                  "progress": 0,
-
-                  "speed": 0,
-
-                  "eta": None,
-
-                  "name": None
-
-              }
-
-
-          else:
-
-              t = data[0]
-
-
-              result = {
-
-                  "status":
-                      t.get(
-                          "state",
-                          "unknown"
-                      ),
-
-                  "progress":
-                      round(
-                          t.get(
-                              "progress",
-                              0
-                          ) * 100,
-                          2
-                      ),
-
-                  "speed":
-                      round(
-                          t.get(
-                              "dlspeed",
-                              0
-                          ) / 1024 / 1024,
-                          2
-                      ),
-
-                  "eta":
-                      t.get("eta"),
-
-                  "name":
-                      t.get("name")
-
-              }
-
-
-          print(
-              json.dumps(result)
-          )
-
-          PY
-
-
-            # =====================================
-            # Display status
-            # =====================================
-
-            cat torrent_status.json
-
-
-            # =====================================
-            # Send status to Cloudflare
-            # =====================================
-
-            RESPONSE=$(curl -s \
-              --max-time 10 \
-              -w "\nHTTP_STATUS:%{http_code}" \
-              -X POST \
-              -H "Authorization: Bearer ${CONTROL_SECRET}" \
-              -H "Content-Type: application/json" \
-              --data-binary @- \
-              "$WORKER_URL/status" <<EOF
-          {
-            "chat_id": "${CHAT_ID}",
-            "status": $(python3 -c 'import json; print(json.dumps(json.load(open("torrent_status.json"))["status"]))'),
-            "progress": $(python3 -c 'import json; print(json.load(open("torrent_status.json"))["progress"])'),
-            "speed": $(python3 -c 'import json; print(json.load(open("torrent_status.json"))["speed"])'),
-            "eta": $(python3 -c 'import json; print(json.load(open("torrent_status.json"))["eta"])'),
-            "name": $(python3 -c 'import json; print(json.dumps(json.load(open("torrent_status.json"))["name"]))')
-          }
-          EOF
-            )
-
-
-            echo "Worker status response:"
-
-            echo "$RESPONSE"
-
-
-            # =====================================
-            # Check completion
-            # =====================================
-
-            COMPLETE=$(python3 - "$DATA" <<'PY'
-
-          import sys
-          import json
-
-
-          try:
-
-              data = json.loads(sys.argv[1])
-
-          except:
-
-              data = []
-
-
-          if (
-              data
-              and
-              data[0].get(
-                  "progress",
-                  0
-              ) >= 0.9999
-          ):
-
-              print("YES")
-
-          else:
-
-              print("NO")
-
-          PY
-            )
-
-
-            if [ "$COMPLETE" = "YES" ]; then
-
-              echo "Download completed successfully."
-
-
-              curl -s \
-                --max-time 10 \
-                -X POST \
-                -H "Authorization: Bearer ${CONTROL_SECRET}" \
-                -H "Content-Type: application/json" \
-                -d "{
-                  \"chat_id\":\"${CHAT_ID}\",
-                  \"status\":\"completed\"
-                }" \
-                "$WORKER_URL/status"
-
-
+          QBIT_PID=$!
+          echo "$QBIT_PID" > qb.pid
+
+          for i in {1..30}; do
+            if grep -q "temporary password is provided for this session" qb.log; then
               break
-
             fi
-
-
-            sleep 5
-
+            sleep 1
           done
 
+          PASSWORD=$(grep -oP 'temporary password is provided for this session: \K.*' qb.log | tail -1 | tr -d '\r')
 
-      # ==========================================
-      # Verify downloaded files
-      # ==========================================
-
-      - name: Verify downloaded files
-
-        run: |
-
-          if [ -f CANCELLED ]; then
-
-            echo "Download was cancelled."
-
-            exit 0
-
+          if [ -z "$PASSWORD" ]; then
+            echo "Could not obtain qBittorrent temporary password"
+            cat qb.log
+            exit 1
           fi
 
+          LOGIN=""
 
-          echo "===== DOWNLOADED FILES ====="
+          for i in {1..20}; do
+            LOGIN=$(curl -s -c cookies.txt \
+              -H "Referer: http://localhost:8080/" \
+              --data-urlencode "username=admin" \
+              --data-urlencode "password=$PASSWORD" \
+              http://localhost:8080/api/v2/auth/login || true)
 
+            if [ "$LOGIN" = "Ok." ]; then
+              break
+            fi
 
-          find downloads \
-            -type f \
-            -printf "%p %s bytes\n"
+            sleep 1
+          done
 
-
-          echo
-
-          echo "===== DISK SPACE ====="
-
-
-          df -h
-
-
-      # ==========================================
-      # Install Google Drive libraries
-      # ==========================================
-
-      - name: Install Google Drive libraries
-
-        run: |
-
-          if [ -f CANCELLED ]; then
-
-            exit 0
-
+          if [ "$LOGIN" != "Ok." ]; then
+            echo "qBittorrent login failed"
+            cat qb.log
+            exit 1
           fi
 
+          status "preparing" 18 0 0 "preparing" "qBittorrent آماده شد" "در انتظار مگنت"
 
-          python3 -m pip install \
-            --break-system-packages \
-            google-api-python-client \
-            google-auth \
-            google-auth-httplib2
+      - name: Add magnet
+        shell: bash
+        run: |
+          set -e
 
+          curl -sS \
+            -b cookies.txt \
+            -H "Referer: http://localhost:8080/" \
+            --data-urlencode "urls=${MAGNET}" \
+            --data-urlencode "savepath=${GITHUB_WORKSPACE}/downloads" \
+            http://localhost:8080/api/v2/torrents/add
 
-      # ==========================================
-      # Upload to Google Drive
-      # ==========================================
+          sleep 3
+
+          for i in {1..30}; do
+            TORRENT_JSON=$(curl -sS \
+              -b cookies.txt \
+              -H "Referer: http://localhost:8080/" \
+              "http://localhost:8080/api/v2/torrents/info?sort=added_on&reverse=true" || echo "[]")
+
+            COUNT=$(echo "$TORRENT_JSON" | jq 'length')
+
+            if [ "$COUNT" -gt 0 ]; then
+              break
+            fi
+
+            sleep 1
+          done
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "Torrent was not added."
+            exit 1
+          fi
+
+          echo "$TORRENT_JSON" | jq '.[0]' > torrent.json
+
+          HASH=$(jq -r '.hash' torrent.json)
+          NAME=$(jq -r '.name' torrent.json)
+
+          echo "HASH=$HASH" >> "$GITHUB_ENV"
+          echo "TORRENT_NAME=$NAME" >> "$GITHUB_ENV"
+
+          status "downloading" 0 0 0 "downloading" "$NAME" "تورنت شناسایی شد و دانلود شروع شد"
+
+      - name: Download torrent
+        shell: bash
+        run: |
+          set -e
+
+          LAST_STATUS=0
+
+          while true; do
+            CONTROL=$(curl -sS --max-time 10 \
+              "${WORKER_URL}/control?secret=${CONTROL_SECRET}&chat_id=${CHAT_ID}&job_id=${JOB_ID}" || echo '{"command":"none"}')
+
+            COMMAND=$(echo "$CONTROL" | jq -r '.command // "none"')
+
+            if [ "$COMMAND" = "pause" ]; then
+              curl -sS -b cookies.txt \
+                -H "Referer: http://localhost:8080/" \
+                --data-urlencode "hashes=${HASH}" \
+                http://localhost:8080/api/v2/torrents/pause >/dev/null || true
+
+              status "paused" "$LAST_STATUS" 0 0 "paused" "$TORRENT_NAME" "دانلود متوقف شده"
+            fi
+
+            if [ "$COMMAND" = "resume" ]; then
+              curl -sS -b cookies.txt \
+                -H "Referer: http://localhost:8080/" \
+                --data-urlencode "hashes=${HASH}" \
+                http://localhost:8080/api/v2/torrents/resume >/dev/null || true
+
+              status "downloading" "$LAST_STATUS" 0 0 "downloading" "$TORRENT_NAME" "دانلود ادامه پیدا کرد"
+            fi
+
+            if [ "$COMMAND" = "cancel" ]; then
+              curl -sS -b cookies.txt \
+                -H "Referer: http://localhost:8080/" \
+                --data-urlencode "hashes=${HASH}" \
+                http://localhost:8080/api/v2/torrents/delete >/dev/null || true
+
+              status "cancelled" "$LAST_STATUS" 0 0 "cancelled" "$TORRENT_NAME" "دانلود لغو شد"
+              exit 0
+            fi
+
+            INFO=$(curl -sS -b cookies.txt \
+              -H "Referer: http://localhost:8080/" \
+              "http://localhost:8080/api/v2/torrents/info?hashes=${HASH}" || echo "[]")
+
+            if [ "$(echo "$INFO" | jq 'length')" -eq 0 ]; then
+              echo "Torrent disappeared from qBittorrent."
+              exit 1
+            fi
+
+            T=$(echo "$INFO" | jq '.[0]')
+
+            STATE=$(echo "$T" | jq -r '.state')
+            NAME=$(echo "$T" | jq -r '.name')
+            PROGRESS=$(echo "$T" | jq -r '.progress * 100')
+            SPEED_BYTES=$(echo "$T" | jq -r '.dlspeed')
+            ETA=$(echo "$T" | jq -r '.eta')
+
+            SPEED=$(python3 -c "print(round(float('${SPEED_BYTES}')/1024/1024,2))")
+            LAST_STATUS=$(python3 -c "print(round(float('${PROGRESS}'),1))")
+
+            if [ "$STATE" = "pausedDL" ] || [ "$STATE" = "pausedUP" ]; then
+              HUMAN_STATUS="paused"
+            else
+              HUMAN_STATUS="downloading"
+            fi
+
+            status "downloading" "$PROGRESS" "$SPEED" "$ETA" "$HUMAN_STATUS" "$NAME" "در حال دریافت از تورنت"
+
+            COMPLETED=$(echo "$T" | jq -r '.progress == 1')
+
+            if [ "$COMPLETED" = "true" ]; then
+              break
+            fi
+
+            sleep 3
+          done
+
+          echo "Torrent completed."
+
+      - name: Find downloaded files
+        shell: bash
+        run: |
+          set -e
+
+          status "processing" 100 0 0 "processing" "$TORRENT_NAME" "در حال آماده‌سازی فایل‌های دانلودشده"
+
+          FILE_COUNT=$(find downloads -type f | wc -l)
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "No files found."
+            exit 1
+          fi
+
+          echo "Downloaded files: $FILE_COUNT"
+
+      - name: Generate video screenshots
+        shell: bash
+        run: |
+          set -e
+
+          status "processing" 100 0 0 "processing" "$TORRENT_NAME" "در حال پیدا کردن ویدیوها و ساخت ۵ تصویر برای هر ویدیو"
+
+          rm -rf screenshots
+          mkdir -p screenshots
+
+          find downloads -type f \( \
+            -iname "*.mp4" -o \
+            -iname "*.mkv" -o \
+            -iname "*.webm" -o \
+            -iname "*.avi" -o \
+            -iname "*.mov" -o \
+            -iname "*.m4v" -o \
+            -iname "*.ts" \
+          \) -print0 > video_list.txt
+
+          while IFS= read -r -d '' VIDEO; do
+            SAFE_NAME=$(basename "$VIDEO" | sed 's/[^A-Za-z0-9._-]/_/g')
+            OUTDIR="screenshots/${SAFE_NAME}"
+            mkdir -p "$OUTDIR"
+
+            DURATION=$(ffprobe -v error \
+              -show_entries format=duration \
+              -of default=noprint_wrappers=1:nokey=1 \
+              "$VIDEO" 2>/dev/null || echo "0")
+
+            DURATION_INT=$(python3 -c "print(int(float('${DURATION:-0}')))" 2>/dev/null || echo 0)
+
+            if [ "$DURATION_INT" -le 600 ]; then
+              START=0
+              END="$DURATION_INT"
+            else
+              START=300
+              END=$((DURATION_INT - 300))
+            fi
+
+            RANGE=$((END - START))
+
+            if [ "$RANGE" -le 0 ]; then
+              continue
+            fi
+
+            for N in 1 2 3 4 5; do
+              SEC=$(python3 -c "start=${START}; r=${RANGE}; n=${N}; print(start + (r*n/6))")
+              OUT="${OUTDIR}/${N}.jpg"
+
+              ffmpeg -hide_banner -loglevel error \
+                -ss "$SEC" \
+                -i "$VIDEO" \
+                -frames:v 1 \
+                -q:v 3 \
+                -y "$OUT" || true
+            done
+
+          done < video_list.txt
 
       - name: Upload to Google Drive
-
-        env:
-
-          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
-
+        shell: bash
         run: |
+          set -e
 
-          if [ -f CANCELLED ]; then
+          status "uploading" 0 0 0 "uploading" "$TORRENT_NAME" "در حال ساخت پوشه Google Drive و آپلود فایل‌ها"
 
-            echo "Cancelled. Skipping Google Drive upload."
-
-            exit 0
-
-          fi
-
-
-          python3 <<'PY'
-
+          cat > drive_upload.py <<'PY'
           import os
           import json
-
+          import mimetypes
+          import subprocess
+          import time
           from pathlib import Path
 
           from google.oauth2.credentials import Credentials
-
-          from google.auth.transport.requests import Request
-
           from googleapiclient.discovery import build
-
           from googleapiclient.http import MediaFileUpload
 
+          WORKER_URL = os.environ["WORKER_URL"]
+          CONTROL_SECRET = os.environ["CONTROL_SECRET"]
+          CHAT_ID = os.environ["CHAT_ID"]
+          JOB_ID = os.environ["JOB_ID"]
+          TOKEN_JSON = os.environ["GOOGLE_TOKEN_JSON"]
+          TORRENT_NAME = os.environ["TORRENT_NAME"]
 
-          print(
-              "Connecting to Google Drive..."
-          )
+          SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
-
-          token = json.loads(
-              os.environ[
-                  "GOOGLE_TOKEN_JSON"
-              ]
-          )
-
-
-          credentials = (
-              Credentials
-              .from_authorized_user_info(
-                  token,
-                  [
-                      "https://www.googleapis.com/auth/drive.file"
-                  ]
-              )
-          )
-
-
-          if (
-              credentials.expired
-              and
-              credentials.refresh_token
-          ):
-
-              credentials.refresh(
-                  Request()
-              )
-
-
-          service = build(
-              "drive",
-              "v3",
-              credentials=credentials
-          )
-
-
-          files = [
-
-              p
-
-              for p
-              in Path(
-                  "downloads"
-              ).rglob("*")
-
-              if p.is_file()
-
-          ]
-
-
-          if not files:
-
-              raise RuntimeError(
-                  "No downloaded files found."
-              )
-
-
-          for path in files:
-
-
-              print()
-
-              print(
-                  "Uploading:",
-                  path.name
-              )
-
-
-              metadata = {
-
-                  "name":
-                      path.name
-
+          def worker_status(progress, speed=0, eta=0, details="در حال آپلود به Google Drive"):
+              payload = {
+                  "chat_id": CHAT_ID,
+                  "job_id": JOB_ID,
+                  "stage": "uploading",
+                  "status": "uploading",
+                  "progress": round(progress, 1),
+                  "speed": round(speed, 2),
+                  "eta": int(max(0, eta)),
+                  "name": TORRENT_NAME,
+                  "details": details
               }
 
+              try:
+                  subprocess.run(
+                      [
+                          "curl", "-sS", "--max-time", "10",
+                          "-X", "POST",
+                          "-H", f"Authorization: Bearer {CONTROL_SECRET}",
+                          "-H", "Content-Type: application/json",
+                          "--data", json.dumps(payload),
+                          f"{WORKER_URL}/status"
+                      ],
+                      stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL,
+                      timeout=15
+                  )
+              except Exception:
+                  pass
+
+          token = json.loads(TOKEN_JSON)
+          creds = Credentials.from_authorized_user_info(token, SCOPES)
+          drive = build("drive", "v3", credentials=creds)
+
+          folder = drive.files().create(
+              body={
+                  "name": TORRENT_NAME,
+                  "mimeType": "application/vnd.google-apps.folder"
+              },
+              fields="id,name"
+          ).execute()
+
+          root_folder_id = folder["id"]
+
+          all_files = [
+              p for p in Path("downloads").rglob("*")
+              if p.is_file()
+          ]
+
+          total_bytes = sum(p.stat().st_size for p in all_files)
+
+          if total_bytes == 0:
+              raise RuntimeError("No files to upload")
+
+          uploaded_bytes = 0
+          links = []
+          upload_started = time.time()
+          last_update = 0
+
+          for path in all_files:
+              size = path.stat().st_size
+              rel = path.relative_to("downloads")
+              parent_id = root_folder_id
+
+              parts = rel.parts[:-1]
+
+              for part in parts:
+                  safe_part = part.replace("'", "''")
+
+                  existing = drive.files().list(
+                      q=(
+                          f"name = '{safe_part}' "
+                          f"and '{parent_id}' in parents "
+                          f"and mimeType = 'application/vnd.google-apps.folder' "
+                          f"and trashed = false"
+                      ),
+                      spaces="drive",
+                      fields="files(id,name)",
+                      pageSize=10
+                  ).execute().get("files", [])
+
+                  if existing:
+                      parent_id = existing[0]["id"]
+                  else:
+                      created = drive.files().create(
+                          body={
+                              "name": part,
+                              "mimeType": "application/vnd.google-apps.folder",
+                              "parents": [parent_id]
+                          },
+                          fields="id"
+                      ).execute()
+                      parent_id = created["id"]
+
+              mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
 
               media = MediaFileUpload(
-
                   str(path),
-
+                  mimetype=mime,
                   resumable=True,
-
-                  chunksize=
-                      100 * 1024 * 1024
-
+                  chunksize=8 * 1024 * 1024
               )
 
-
-              request = (
-                  service
-                  .files()
-                  .create(
-
-                      body=metadata,
-
-                      media_body=media,
-
-                      fields=
-                          "id,name,size"
-
-                  )
+              request = drive.files().create(
+                  body={
+                      "name": path.name,
+                      "parents": [parent_id]
+                  },
+                  media_body=media,
+                  fields="id,name,size"
               )
-
 
               response = None
 
-
               while response is None:
+                  status_obj, response = request.next_chunk()
 
+                  if status_obj:
+                      current_file = int(status_obj.resumable_progress)
+                      overall = uploaded_bytes + current_file
+                      progress = (overall / total_bytes) * 100
 
-                  status, response = (
-                      request.next_chunk()
-                  )
+                      elapsed = max(0.1, time.time() - upload_started)
+                      speed = overall / elapsed / 1024 / 1024
+                      remaining = max(0, total_bytes - overall)
+                      eta = remaining / max(1, overall / elapsed)
 
+                      now = time.time()
 
-                  if status:
+                      if now - last_update >= 3:
+                          worker_status(
+                              progress,
+                              speed,
+                              eta,
+                              f"آپلود: {path.name}"
+                          )
+                          last_update = now
 
-                      print(
+              uploaded_bytes += size
+              file_id = response["id"]
 
-                          f"Upload progress: "
-                          f"{status.progress() * 100:.1f}%"
+              try:
+                  drive.permissions().create(
+                      fileId=file_id,
+                      body={
+                          "type": "anyone",
+                          "role": "reader"
+                      },
+                      fields="id"
+                  ).execute()
+              except Exception as exc:
+                  print(f"Permission warning for {path.name}: {exc}")
 
-                      )
+              links.append({
+                  "name": str(rel),
+                  "url": f"https://drive.google.com/uc?export=download&id={file_id}",
+                  "id": file_id
+              })
 
-
-              print(
-                  "UPLOAD COMPLETE"
+              worker_status(
+                  (uploaded_bytes / total_bytes) * 100,
+                  0,
+                  0,
+                  f"{path.name} با موفقیت آپلود شد"
               )
 
-
-              print(
-                  "File ID:",
-                  response["id"]
+          with open("drive_result.json", "w", encoding="utf-8") as f:
+              json.dump(
+                  {
+                      "folder_id": root_folder_id,
+                      "folder_name": TORRENT_NAME,
+                      "links": links,
+                      "files": [x["name"] for x in links]
+                  },
+                  f,
+                  ensure_ascii=False,
+                  indent=2
               )
 
-
-              print(
-                  "File name:",
-                  response["name"]
-              )
-
-
+          print(json.dumps({
+              "folder_id": root_folder_id,
+              "links": links
+          }, ensure_ascii=False))
           PY
 
+          python3 drive_upload.py
 
-      # ==========================================
-      # Cleanup
-      # ==========================================
-
-      - name: Cleanup
-
-        if: always()
-
+      - name: Send completion to Telegram
+        shell: bash
         run: |
+          set -e
 
-          if [ -f qb.pid ]; then
+          LINKS=$(jq -c '.links' drive_result.json)
+          FILES=$(jq -c '.files' drive_result.json)
 
-            kill "$(cat qb.pid)" \
-              2>/dev/null || true
+          curl -sS --max-time 20 \
+            -X POST \
+            -H "Authorization: Bearer ${CONTROL_SECRET}" \
+            -H "Content-Type: application/json" \
+            --data-binary @- \
+            "${WORKER_URL}/complete" <<EOF
+          {
+            "chat_id": "${CHAT_ID}",
+            "job_id": "${JOB_ID}",
+            "success": true,
+            "files": ${FILES},
+            "links": ${LINKS}
+          }
+          EOF
 
+      - name: Send video screenshots
+        shell: bash
+        run: |
+          set -e
+
+          if [ ! -d screenshots ]; then
+            exit 0
           fi
 
+          while IFS= read -r -d '' IMAGE; do
+            VIDEO_NAME=$(basename "$(dirname "$IMAGE")")
+            PHOTO_INDEX=$(basename "$IMAGE" .jpg)
 
-          rm -f cookies.txt
+            CAPTION="🎬 ${VIDEO_NAME}
+          📸 تصویر ${PHOTO_INDEX} از 5"
 
+            curl -sS --max-time 30 \
+              -X POST \
+              -F "chat_id=${CHAT_ID}" \
+              -F "photo=@${IMAGE}" \
+              -F "caption=${CAPTION}" \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto" \
+              >/dev/null || true
 
-          df -h
+          done < <(find screenshots -type f -name "*.jpg" -print0 | sort -z)
+
+      - name: Report failure
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+
+          curl -sS --max-time 20 \
+            -X POST \
+            -H "Authorization: Bearer ${CONTROL_SECRET}" \
+            -H "Content-Type: application/json" \
+            --data-binary @- \
+            "${WORKER_URL}/complete" <<EOF
+          {
+            "chat_id": "${CHAT_ID}",
+            "job_id": "${JOB_ID}",
+            "success": false,
+            "error": "GitHub Actions workflow failed. Check the Actions log."
+          }
+          EOF
+
+      - name: Final status
+        if: always()
+        shell: bash
+        run: |
+          echo "Workflow finished."
+          echo "Job ID: ${JOB_ID}"
+          echo "Torrent: ${TORRENT_NAME:-unknown}"
