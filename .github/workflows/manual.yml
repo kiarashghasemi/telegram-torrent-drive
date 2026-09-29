@@ -22,7 +22,6 @@ jobs:
           qbittorrent-nox \
             --profile="$GITHUB_WORKSPACE/qb-profile" \
             --webui-port=8080 \
-            --confirm-legal-notice \
             ubuntu-24.04.5.1-desktop-amd64.iso.torrent > qb.log 2>&1 &
 
           QB_PID=$!
