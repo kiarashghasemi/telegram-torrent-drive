@@ -24,7 +24,7 @@ jobs:
       - name: Install qBittorrent
         run: |
           sudo apt-get update
-          sudo apt-get install -y qbittorrent-nox curl python3-pip
+          sudo apt-get install -y qbittorrent-nox curl
 
       - name: Start qBittorrent
         run: |
@@ -75,37 +75,56 @@ jobs:
               -H "Referer: http://localhost:8080/" \
               "http://localhost:8080/api/v2/torrents/info")
 
-            python3 - "$DATA" <<'PY'
-          import sys, json
+            RESULT=$(python3 - "$DATA" <<'PY'
+          import sys
+          import json
 
           data = json.loads(sys.argv[1])
 
           if not data:
-              print("Waiting for torrent...")
-              sys.exit()
+              print("WAITING")
+              sys.exit(0)
 
           t = data[0]
 
+          progress = t["progress"] * 100
+          speed = t["dlspeed"] / 1024 / 1024
+          eta = t["eta"]
+          state = t["state"]
+
           print(
-              f"Name: {t['name']}\n"
-              f"State: {t['state']}\n"
-              f"Progress: {t['progress']*100:.2f}%\n"
-              f"Speed: {t['dlspeed']/1024/1024:.2f} MB/s\n"
-              f"Peers: {t['num_peers'] if 'num_peers' in t else 0}\n"
-              f"ETA: {t['eta']} sec"
+              f"State: {state}\n"
+              f"Progress: {progress:.2f}%\n"
+              f"Speed: {speed:.2f} MB/s\n"
+              f"ETA: {eta} sec"
           )
 
-          if t["progress"] >= 1:
+          if progress >= 100:
               print("DOWNLOAD_COMPLETE")
-              sys.exit(10)
+              sys.exit(2)
           PY
+          )
 
-            if [ $? -eq 10 ]; then
+            CODE=$?
+
+            echo "$RESULT"
+
+            if [ "$CODE" -eq 2 ]; then
+              echo "Download completed successfully."
               break
             fi
 
             sleep 10
           done
+
+      - name: Verify downloaded files
+        run: |
+          echo "===== DOWNLOADED FILES ====="
+          find downloads -type f -printf "%p %s bytes\n"
+
+          echo
+          echo "===== DISK ====="
+          df -h
 
       - name: Install Google Drive libraries
         run: |
@@ -119,14 +138,13 @@ jobs:
         env:
           GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
         run: |
-          echo "$GOOGLE_TOKEN_JSON" > token.json
-
           python3 <<'PY'
           import os
           import json
           from pathlib import Path
 
           from google.oauth2.credentials import Credentials
+          from google.auth.transport.requests import Request
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
 
@@ -137,19 +155,28 @@ jobs:
               ["https://www.googleapis.com/auth/drive.file"]
           )
 
-          service = build("drive", "v3", credentials=credentials)
+          if credentials.expired and credentials.refresh_token:
+              credentials.refresh(Request())
 
-          files = []
+          service = build(
+              "drive",
+              "v3",
+              credentials=credentials
+          )
 
-          for path in Path("downloads").rglob("*"):
-              if path.is_file():
-                  files.append(path)
+          files = [
+              p for p in Path("downloads").rglob("*")
+              if p.is_file()
+          ]
 
           if not files:
-              raise RuntimeError("No downloaded file found.")
+              raise RuntimeError("No downloaded files found.")
 
           for path in files:
+              size = path.stat().st_size
+
               print(f"Uploading: {path}")
+              print(f"Size: {size / 1024 / 1024:.2f} MB")
 
               metadata = {
                   "name": path.name
@@ -178,7 +205,7 @@ jobs:
                           f"{status.progress() * 100:.1f}%"
                       )
 
-              print("Uploaded successfully:")
+              print("UPLOAD COMPLETE")
               print(response)
           PY
 
@@ -186,7 +213,7 @@ jobs:
         if: always()
         run: |
           kill $(cat qb.pid) 2>/dev/null || true
-          rm -f token.json cookies.txt
+          rm -f cookies.txt
 
           echo "===== FINAL DISK ====="
           df -h
