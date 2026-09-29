@@ -1,10 +1,15 @@
-name: qBittorrent Test
+name: Magnet to Google Drive
 
 on:
   workflow_dispatch:
+    inputs:
+      magnet:
+        description: "Magnet link"
+        required: true
+        type: string
 
 jobs:
-  torrent:
+  download:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,11 +24,7 @@ jobs:
       - name: Install qBittorrent
         run: |
           sudo apt-get update
-          sudo apt-get install -y qbittorrent-nox curl
-
-      - name: Download Ubuntu torrent
-        run: |
-          wget -q https://releases.ubuntu.com/releases/releases/releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso.torrent
+          sudo apt-get install -y qbittorrent-nox curl python3-pip
 
       - name: Start qBittorrent
         run: |
@@ -38,58 +39,154 @@ jobs:
 
           sleep 15
 
-          echo "===== qBittorrent startup ====="
           cat qb.log
 
-      - name: Add torrent through Web API
+      - name: Login to qBittorrent
         run: |
           PASSWORD=$(grep -oP 'temporary password is provided for this session: \K.*' qb.log)
 
-          echo "Logging into qBittorrent..."
-
-          curl -i \
+          curl -s \
             -c cookies.txt \
             -H "Referer: http://localhost:8080/" \
             --data-urlencode "username=admin" \
             --data-urlencode "password=$PASSWORD" \
             http://localhost:8080/api/v2/auth/login
 
-          echo
-          echo "Adding torrent..."
-
-          curl -i \
+      - name: Add Magnet
+        env:
+          MAGNET: ${{ inputs.magnet }}
+        run: |
+          curl -s \
             -b cookies.txt \
             -H "Referer: http://localhost:8080/" \
-            -F "torrents=@ubuntu-24.04.5.1-desktop-amd64.iso.torrent" \
-            -F "savepath=$GITHUB_WORKSPACE/downloads" \
+            --data-urlencode "urls=$MAGNET" \
+            --data-urlencode "savepath=$GITHUB_WORKSPACE/downloads" \
             http://localhost:8080/api/v2/torrents/add
 
-      - name: Monitor download
+          echo
+          echo "Magnet added."
+
+      - name: Wait for download
         run: |
-          echo "===== MONITORING ====="
+          for i in {1..720}; do
 
-          for i in {1..12}; do
-            echo
-            echo "===== CHECK $i ====="
-
-            curl -s \
+            DATA=$(curl -s \
               -b cookies.txt \
               -H "Referer: http://localhost:8080/" \
-              "http://localhost:8080/api/v2/torrents/info" \
-              | python3 -m json.tool || true
+              "http://localhost:8080/api/v2/torrents/info")
 
-            echo
-            echo "===== FILE SIZE ====="
-            find downloads -type f -printf "%p %s bytes\n"
+            python3 - "$DATA" <<'PY'
+          import sys, json
+
+          data = json.loads(sys.argv[1])
+
+          if not data:
+              print("Waiting for torrent...")
+              sys.exit()
+
+          t = data[0]
+
+          print(
+              f"Name: {t['name']}\n"
+              f"State: {t['state']}\n"
+              f"Progress: {t['progress']*100:.2f}%\n"
+              f"Speed: {t['dlspeed']/1024/1024:.2f} MB/s\n"
+              f"Peers: {t['num_peers'] if 'num_peers' in t else 0}\n"
+              f"ETA: {t['eta']} sec"
+          )
+
+          if t["progress"] >= 1:
+              print("DOWNLOAD_COMPLETE")
+              sys.exit(10)
+          PY
+
+            if [ $? -eq 10 ]; then
+              break
+            fi
 
             sleep 10
           done
 
-      - name: qBittorrent log
+      - name: Install Google Drive libraries
+        run: |
+          python3 -m pip install \
+            --break-system-packages \
+            google-api-python-client \
+            google-auth \
+            google-auth-httplib2
+
+      - name: Upload to Google Drive
+        env:
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+        run: |
+          echo "$GOOGLE_TOKEN_JSON" > token.json
+
+          python3 <<'PY'
+          import os
+          import json
+          from pathlib import Path
+
+          from google.oauth2.credentials import Credentials
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          token = json.loads(os.environ["GOOGLE_TOKEN_JSON"])
+
+          credentials = Credentials.from_authorized_user_info(
+              token,
+              ["https://www.googleapis.com/auth/drive.file"]
+          )
+
+          service = build("drive", "v3", credentials=credentials)
+
+          files = []
+
+          for path in Path("downloads").rglob("*"):
+              if path.is_file():
+                  files.append(path)
+
+          if not files:
+              raise RuntimeError("No downloaded file found.")
+
+          for path in files:
+              print(f"Uploading: {path}")
+
+              metadata = {
+                  "name": path.name
+              }
+
+              media = MediaFileUpload(
+                  str(path),
+                  resumable=True,
+                  chunksize=100 * 1024 * 1024
+              )
+
+              request = service.files().create(
+                  body=metadata,
+                  media_body=media,
+                  fields="id,name,size"
+              )
+
+              response = None
+
+              while response is None:
+                  status, response = request.next_chunk()
+
+                  if status:
+                      print(
+                          f"Upload progress: "
+                          f"{status.progress() * 100:.1f}%"
+                      )
+
+              print("Uploaded successfully:")
+              print(response)
+          PY
+
+      - name: Cleanup
         if: always()
         run: |
-          echo "===== FINAL LOG ====="
-          cat qb.log || true
+          kill $(cat qb.pid) 2>/dev/null || true
+          rm -f token.json cookies.txt
 
-          echo "===== FINAL FILES ====="
-          find downloads -type f -printf "%p %s bytes\n" || true
+          echo "===== FINAL DISK ====="
+          df -h
